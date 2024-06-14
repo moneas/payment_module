@@ -7,10 +7,13 @@ use App\Models\User;
 use Illuminate\Http\Request;
 use App\Jobs\ProcessTransaction;
 use Illuminate\Support\Facades\Cache;
+use App\Http\Requests\StoreTransactionRequest;
+use App\Http\Requests\UpdateTransactionRequest;
+use Illuminate\Support\Facades\DB;
+use Exception;
 
 class PaymentController extends Controller
 {
-
     protected $middleware = [];
     
     public function __construct()
@@ -18,38 +21,56 @@ class PaymentController extends Controller
         $this->middleware('throttle:10,1'); // Maksimal 10 requests per menit
     }
 
-
-    public function createTransaction(Request $request)
+    public function createTransaction(StoreTransactionRequest $request)
     {
-        // untuk endpoint membuat transaksi baru dengan status pending
-        $validatedData = $request->validate([
-            'user_id' => 'required|exists:users,id',
-            'amount' => 'required|numeric',
-        ]);
-    
-        $transaction = Transaction::create([
-            'user_id' => $validatedData['user_id'],
-            'amount' => $validatedData['amount'],
-            'status' => Transaction::STATUS_PENDING,
-        ]);
-    
-        // Tambahkan transaksi ke dalam queue untuk diproses
-        ProcessTransaction::dispatch($transaction);
-    
-        return response()->json($transaction, 201);
-    
+        DB::beginTransaction();
+        
+        try {
+            $validatedData = $request->validated();
+        
+            $transaction = Transaction::create([
+                'user_id' => $validatedData['user_id'],
+                'amount' => $validatedData['amount'],
+                'status' => Transaction::STATUS_PENDING,
+            ]);
+        
+            // Tambahkan transaksi ke dalam queue untuk diproses
+            ProcessTransaction::dispatch($transaction);
+            
+            DB::commit();
+        
+            return response()->json($transaction, 201);
+        } catch (Exception $e) {
+            DB::rollBack();
+            return response()->json(['error' => 'Gagal menyimpan transaksi'], 500);
+        }
     }
 
-    public function processPayment(Request $request, $transactionId)
+    public function processPayment(UpdateTransactionRequest $request, $transactionId)
     {
-        // untuk endpoint proses pembayaran dan mengubah status transaksi menjadi 'completed' atau 'failed'
+        DB::beginTransaction();
+        
+        try {
+            $transaction = Transaction::findOrFail($transactionId);
+            $validatedData = $request->validated();
+            
+            $transaction->update([
+                'status' => $validatedData['status'],
+            ]);
+            
+            DB::commit();
+            
+            return response()->json($transaction, 200);
+        } catch (Exception $e) {
+            DB::rollBack();
+            return response()->json(['error' => 'Gagal memproses transaksi'], 500);
+        }
     }
 
     public function getUserTransactions(Request $request, $userId)
     {
-        // untuk endpoint history transaksi pengguna dengan pagination
         $cacheKey = 'user_transactions_' . $userId;
-        $minutes = 1;//seting lama expired cache
+        $minutes = 10; // Contoh: cache valid selama 10 menit
 
         return response()->json(
             Cache::remember($cacheKey, $minutes, function () use ($userId) {
@@ -57,14 +78,10 @@ class PaymentController extends Controller
                 return $transactions;
             })
         );
-
     }
-
 
     public function getTransactionDataSummary()
     {
-        // untuk endpoint pengambilan data summary 
-
         $totalTransactions = Transaction::count();
         $averageAmount = Transaction::avg('amount');
         $highestTransaction = Transaction::orderBy('amount', 'desc')->first();
@@ -96,6 +113,4 @@ class PaymentController extends Controller
             'status_distribution' => $statusDistribution,
         ]);
     }
-
 }
-
